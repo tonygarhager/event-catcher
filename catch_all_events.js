@@ -3,7 +3,7 @@ const { ethers } = require("ethers");
 //const { MongoClient } = require("mongodb");
 
 // Load environment variables
-const WS_URL = process.env.WS_URL;
+const RPC_URL = process.env.RPC_URL;
 const CONTRACT_ABI = [
     "event Transfer(address indexed from, address indexed to, uint value)",
     // "event Approval(address indexed owner, address indexed spender, uint value)",
@@ -24,90 +24,89 @@ const TOKEN_ADDR = process.env.TOKEN_ADDRESS;
 const contractInterface = new ethers.Interface(CONTRACT_ABI);
 
 // Function to create WebSocket provider (handles auto-reconnect)
-function createProvider() {
-    return new ethers.WebSocketProvider(WS_URL);
+const provider = new ethers.JsonRpcProvider(RPC_URL);
+let START_BLOCK_INDEX = process.env.LAST_BLOCK_INDEX;
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// Start watching new blocks
-async function watchBlocks() {
-    console.log("🔗 Connecting to Ethereum WebSocket...");
+async function checkBlocksFrom(startBlockIndex) {
+    if (startBlockIndex == undefined)
+        startBlockIndex = await provider.getBlockNumber();
+    console.log(`⛓ Checking blocks starting from #${startBlockIndex} for events...`);
 
-    let provider = createProvider();
-    // const dburi = "mongodb+srv://tonygarhager:kkndkknd823@cluster0.k3tc3.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0";
-    // const dbClient = new MongoClient(dburi);
-    // await dbClient.connect();
+    let currentBlock = startBlockIndex;
     
-    // Listen for new blocks
-    provider.on("block", async (blockNumber) => {
-        console.log(`⛓  New Block: #${blockNumber}`);
-
-        // Fetch block details
-        const block = await provider.getBlock(blockNumber, true);
-        if (!block) return;
-
-        // Process each transaction in the block
-        for (let tx of block.transactions) {
+    // Loop through each block until the latest block
+    while (true) {
+        const latestBlock = await provider.getBlockNumber(); // Get latest block number
+        if (currentBlock > latestBlock) {
+            await sleep(100);
+            console.log("waiting...");
+        } else {
             try {
-                if (tx) {
-                    // Get transaction receipt (to check events)
-                    const receipt = await provider.getTransactionReceipt(tx);
-                    if (receipt && receipt.logs.length > 0) {
-                        
-                        let first = true;
+                console.log(`delay = ${latestBlock - currentBlock}`);
+                console.log(`⛓ Processing Block #${currentBlock}`);
 
-                        // Enumerate all events (logs)
-                        receipt.logs.forEach((log, index) => {
-                            if (log.address.toLowerCase() === TOKEN_ADDR.toLowerCase()) {
+                // Fetch block with transactions
+                const block = await provider.getBlock(currentBlock);
+                if (!block || !block.transactions) {
+                    console.log(`❌ Block #${currentBlock} not found or no transactions`);
+                    currentBlock++;
+                    continue;
+                }
+                /*
+                const filteredTxs = block.transactions.filter(tx =>
+                    (tx.address.toLowerCase() === TOKEN_ADDR.toLowerCase())
+                );
+                */
+                // Process each transaction in the block
+                for (let txHash of block.transactions) {
+                    try {
+                        // Get transaction receipt (to check events)
+                        const receipt = await provider.getTransactionReceipt(txHash);
+                        if (receipt && receipt.logs.length > 0) {
+                            let first = true;
+                            // Enumerate all events (logs)
+                            receipt.logs.forEach((log) => {
                                 try {
+                                    // Check if the log is from the token contract
+                                    if (log.address.toLowerCase() === TOKEN_ADDR.toLowerCase()) {
+                                        // Parse the log with contract interface
+                                        const parsedLog = contractInterface.parseLog(log);
 
-                                    const parsedLog = contractInterface.parseLog(log);
-                                    
-                                    if (first) {
-                                        console.log(`🔍 Tx Hash: ${tx}`);
-                                        first = false;
+                                        // Check if the event is a Transfer event
+                                        if (parsedLog.name === "Transfer") {
+                                            if (first) {
+                                                console.log(`🔍 Tx Hash: ${txHash}`);
+                                                first = false;
+                                            }
+                                            console.log(`📢 Transfer Event Detected:`);
+                                            console.log(`   - From: ${parsedLog.args.from}`);
+                                            console.log(`   - To: ${parsedLog.args.to}`);
+                                            console.log(`   - Value: ${ethers.formatUnits(parsedLog.args.value, 6)} USDT`);
+                                            console.log(`   - Contract Address: ${log.address}`);
+                                            console.log("--------------------------------------");
+                                        }
                                     }
-                                    console.log(`📢 Event: ${parsedLog.name}`);
-                                    console.log(`   - From: ${parsedLog.args.from}`);
-                                    console.log(`   - To: ${parsedLog.args.to}`);
-                                    console.log(`   - Value: ${ethers.formatUnits(parsedLog.args.value, 6)} USDT`);
-
-                                    // console.log(`   - Contract Address: ${log.address}`);
-                                    // console.log(`   - Topics: ${JSON.stringify(log.topics)}`);
-                                    // console.log(`   - Data: ${log.data}`);
-                                    console.log("--------------------------------------");
                                 } catch (error) {
-                                    /*console.log(`📢 Event: ${log.index + 1}`);
-                                    console.log(`   - Contract Address: ${log.address}`);
-                                    console.log(`   - Topics: ${JSON.stringify(log.topics)}`);
-                                    console.log(`   - Data: ${log.data}`);
-                                    console.log("--------------------------------------");
-                                    */
+                                    console.log("⚠️ Could not decode log event");
                                 }
-                            }
-                    });
+                            });
+                        }
+                    } catch (error) {
+                        console.error(`❌ Error fetching tx receipt for ${txHash}: ${error.message}`);
                     }
                 }
+
+                // Move to the next block
+                currentBlock++;
             } catch (error) {
-                console.error(`❌ Error fetching tx receipt for ${tx.hash}: ${error.message}`);
+                console.error(`❌ Error fetching block #${currentBlock}: ${error.message}`);
+                break; // Exit loop in case of critical error
             }
         }
-    });
-
-    // Handle WebSocket disconnects
-    provider.websocket.on("close", () => {
-        console.error("❌ WebSocket disconnected! Reconnecting...");
-        setTimeout(() => {
-            provider.removeAllListeners(); // Remove old listeners
-            watchBlocks(); // Restart connection
-        }, 5000);
-    });
-
-    provider.websocket.on("error", (error) => {
-        console.error("❌ WebSocket error:", error.message);
-    });
-
-    console.log("🎧 Watching Ethereum blocks & events...");
+    }
 }
-
-// Start watching
-watchBlocks();
+checkBlocksFrom(START_BLOCK_INDEX); 
