@@ -40,71 +40,46 @@ async function checkBlocksFrom(startBlockIndex) {
     
     // Loop through each block until the latest block
     while (true) {
+
         const latestBlock = await provider.getBlockNumber(); // Get latest block number
         if (currentBlock > latestBlock) {
             await sleep(100);
-            console.log("waiting...");
         } else {
             try {
+                const logs = await provider.getLogs({
+                    fromBlock: currentBlock,
+                    toBlock: currentBlock,
+                    address: TOKEN_ADDR,
+                    topics: [
+                        ethers.id("Transfer(address,address,uint256)")
+                    ]
+                });
+
                 console.log(`delay = ${latestBlock - currentBlock}`);
                 console.log(`⛓ Processing Block #${currentBlock}`);
 
-                // Fetch block with transactions
-                const block = await provider.getBlock(currentBlock);
-                if (!block || !block.transactions) {
-                    console.log(`❌ Block #${currentBlock} not found or no transactions`);
-                    currentBlock++;
-                    continue;
-                }
-                /*
-                const filteredTxs = block.transactions.filter(tx =>
-                    (tx.address.toLowerCase() === TOKEN_ADDR.toLowerCase())
-                );
-                */
-                // Process each transaction in the block
-                for (let txHash of block.transactions) {
-                    try {
-                        // Get transaction receipt (to check events)
-                        const receipt = await provider.getTransactionReceipt(txHash);
-                        if (receipt && receipt.logs.length > 0) {
-                            let first = true;
-                            // Enumerate all events (logs)
-                            receipt.logs.forEach((log) => {
-                                try {
-                                    // Check if the log is from the token contract
-                                    if (log.address.toLowerCase() === TOKEN_ADDR.toLowerCase()) {
-                                        // Parse the log with contract interface
-                                        const parsedLog = contractInterface.parseLog(log);
+                logs.forEach(log => {
+                    const parsedLog = contractInterface.parseLog(log);
+                    
+                    // Extract 'from' and 'to' addresses from the parsed log
+                    const fromAddress = parsedLog.args.from;
+                    const toAddress = parsedLog.args.to;
+                    const value = ethers.formatUnits(parsedLog.args.value, 6);  // Format for USDT (6 decimals)
+                    
+                    console.log(`📢 Transfer Event Detected:`);
+                    console.log(`   - From: ${fromAddress}`);
+                    console.log(`   - To: ${toAddress}`);
+                    console.log(`   - Value: ${value} USDT`);
+                    console.log("--------------------------------------");
+                });
 
-                                        // Check if the event is a Transfer event
-                                        if (parsedLog.name === "Transfer") {
-                                            if (first) {
-                                                console.log(`🔍 Tx Hash: ${txHash}`);
-                                                first = false;
-                                            }
-                                            console.log(`📢 Transfer Event Detected:`);
-                                            console.log(`   - From: ${parsedLog.args.from}`);
-                                            console.log(`   - To: ${parsedLog.args.to}`);
-                                            console.log(`   - Value: ${ethers.formatUnits(parsedLog.args.value, 6)} USDT`);
-                                            console.log(`   - Contract Address: ${log.address}`);
-                                            console.log("--------------------------------------");
-                                        }
-                                    }
-                                } catch (error) {
-                                    console.log("⚠️ Could not decode log event");
-                                }
-                            });
-                        }
-                    } catch (error) {
-                        console.error(`❌ Error fetching tx receipt for ${txHash}: ${error.message}`);
-                    }
-                }
-
-                // Move to the next block
                 currentBlock++;
             } catch (error) {
                 console.error(`❌ Error fetching block #${currentBlock}: ${error.message}`);
-                break; // Exit loop in case of critical error
+                //console.log(`Attempt ${attempt + 1} failed, retrying in ${retryTimeout / 1000} seconds...`);
+                await new Promise(resolve => setTimeout(resolve, 1000));  // Delay before retry
+            
+                //break; // Exit loop in case of critical error
             }
         }
     }
